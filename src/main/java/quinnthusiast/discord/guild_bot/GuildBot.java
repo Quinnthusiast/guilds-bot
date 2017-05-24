@@ -1,14 +1,27 @@
 package quinnthusiast.discord.guild_bot;
 
-import java.util.Arrays;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import sx.blah.discord.api.ClientBuilder;
+import sx.blah.discord.api.IDiscordClient;
 import sx.blah.discord.api.events.EventSubscriber;
+import sx.blah.discord.handle.impl.events.ReadyEvent;
+import sx.blah.discord.handle.impl.events.guild.GuildCreateEvent;
 import sx.blah.discord.handle.impl.events.guild.channel.message.MessageReceivedEvent;
+import sx.blah.discord.handle.impl.events.guild.member.UserJoinEvent;
+import sx.blah.discord.handle.obj.IChannel;
 import sx.blah.discord.handle.obj.IGuild;
 import sx.blah.discord.handle.obj.IMessage;
 import sx.blah.discord.handle.obj.IPrivateChannel;
@@ -17,34 +30,71 @@ import sx.blah.discord.handle.obj.IUser;
 
 public class GuildBot
 {
-	private Map<IGuild, String> prefixMap;
-	private Map<IGuild, IRole> memberRoleMap;
+	
+	private IDiscordClient c;
+	private AtomicBoolean ready;
+	private Map<String, String> prefixMap;
+	private Map<String, Long> memberRoleMap;
 	private ExecutorService pool;
 	
 	public GuildBot(String token)
 	{
-		 new ClientBuilder()
-				.withToken(token)
-				.registerListeners(this)
-				.login();
+		ready = new AtomicBoolean(false);
 		
-		prefixMap = new HashMap<>();
+		deserializePrefixes();
+		deserializeRoles();
+		if (prefixMap == null)  prefixMap = new HashMap<>();
+		if (memberRoleMap == null) memberRoleMap = new HashMap<>();
 		pool = Executors.newCachedThreadPool();
+		
+		 c = new ClientBuilder()
+			.withToken(token)
+			.registerListeners(this)
+			.login();
+	
+	}
+	
+	@EventSubscriber
+	public void onReadyEvent(ReadyEvent e)
+	{
+		ready.set(true);
 	}
 	
 	@EventSubscriber
 	public void onMessageReceived(MessageReceivedEvent e)
 	{
+		if (!ready.get()) return;
 		pool.execute(() -> process(e));
+	}
+	
+	@EventSubscriber
+	public void onUserJoin(UserJoinEvent e)
+	{
+		IGuild g = e.getGuild();
+		g.getChannelByID(g.getLongID()).sendMessage("Welcome to " + g.getName() + ", " + e.getUser().getDisplayName(g) + "! Please use `" + prefixMap.get(g.getStringID()) + "register <ign>` (without the angle brackets) to register. \nEnjoy your stay with us~");
+	}
+	
+	@EventSubscriber
+	public void onJoinGuild(GuildCreateEvent e)
+	{
+		if (!ready.get()) return;
+		pool.execute(() -> requestPrefix(e.getGuild()));
 	}
 	
 	private void process(MessageReceivedEvent e)
 	{
 		IGuild theGuild = e.getGuild();
-		String prefix = prefixMap.get(theGuild);
-		if (prefix == null)
+		String prefix = prefixMap.get(theGuild.getStringID());
+		if (prefix == null && !e.getChannel().isPrivate())
 		{
+			c.getDispatcher().unregisterListener(this);
 			requestPrefix(theGuild);
+			c.getDispatcher().registerListener(this);
+			return;
+		}
+		
+		if (e.getChannel().isPrivate())
+		{
 			return;
 		}
 		
@@ -56,11 +106,10 @@ public class GuildBot
 		}
 		
 		String[] sliced = content.substring(prefix.length()).split(" ");
-		String[] args = Arrays.copyOf(sliced, sliced.length-1);
 		switch(sliced[0].toLowerCase())
 		{
-			case "register": register(e.getGuild(), e.getAuthor(), args); break;
-			case "setrole": setRole(e.getGuild(), e.getAuthor(), args); break;
+			case "register": register(theGuild, e.getAuthor(), sliced); break;
+			case "setrole": setRole(e.getMessage().getChannel(), e.getAuthor(), sliced); break;
 			default: return;
 		}
 		
@@ -69,33 +118,116 @@ public class GuildBot
 	
 	private void register(IGuild g, IUser author, String[] args)
 	{
-		String ign = args[0];
+		if (args.length < 1) { return; }
+		String ign = args[1];
+		try
+		{
 		g.setUserNickname(author, ign);
-		IRole r = memberRoleMap.get(g);
+		} catch (Exception e) {
+			System.err.println("nickexc");
+		}
+		try
+		{
+		IRole r = g
+				.getRoleByID(
+						memberRoleMap.get(
+								g.getStringID()));
 		if (r != null)
 		{
 			author.addRole(r);
 		}
+		} catch (Exception e) {
+			e.printStackTrace();
+			System.err.println("roleexc");
+		}
 	}
 	
-	private void setRole(IGuild g, IUser author, String[] args)
+	private void setRole(IChannel c, IUser author, String[] args)
 	{
-		if (!g.getOwner().equals(author))
+		if (args.length < 1) { return; } 
+		if (!c.getGuild().getOwner().equals(author))
 		{
 			return;
 		}
 		
-		IRole r = g.getRolesByName(args[0]).get(0);
-		memberRoleMap.put(g, r);
+		List<IRole> match = c.getGuild().getRolesByName(args[1]);
+		if (match.isEmpty())
+		{
+			c.sendMessage("no matching roles found");
+		}
+		else
+		{
+			memberRoleMap.put(c.getGuild().getStringID(), match.get(0).getLongID());
+			serializeRoles();
+		}
+	}
+	
+	private void serializePrefixes()
+	{
+		try(ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream("prefix.ser")))
+		{
+			oos.writeObject(prefixMap);
+		} catch (FileNotFoundException e) {
+			File f = new File("prefix.ser");
+			if (!f.mkdir()) { throw new RuntimeException("cannot make file ".concat(f.getPath())); }
+			serializePrefixes();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+	}
+	
+	@SuppressWarnings("unchecked")
+	private void deserializePrefixes()
+	{
+		try(ObjectInputStream ois = new ObjectInputStream(new FileInputStream("prefix.ser")))
+		{
+			prefixMap = (Map<String, String>) ois.readObject();
+		} catch (FileNotFoundException e) {
+			e.printStackTrace();
+		} catch (IOException e) {
+			e.printStackTrace();
+		} catch (ClassNotFoundException e) {
+			e.printStackTrace();
+		}
+	}
+	
+	private void serializeRoles()
+	{
+		try(ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream("role.ser")))
+		{
+			oos.writeObject(memberRoleMap);
+		} catch (FileNotFoundException e) {
+			File f = new File("prefix.ser");
+			if (!f.mkdir()) { throw new RuntimeException("cannot make file ".concat(f.getPath())); }
+			serializePrefixes();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
 	}
 
+	@SuppressWarnings("unchecked")
+	private void deserializeRoles()
+	{
+		try(ObjectInputStream ois = new ObjectInputStream(new FileInputStream("role.ser")))
+		{
+			memberRoleMap = (Map<String, Long>) ois.readObject();
+		} catch (FileNotFoundException e) {
+			e.printStackTrace();
+		} catch (IOException e) {
+			e.printStackTrace();
+		} catch (ClassNotFoundException e) {
+			e.printStackTrace();
+		}
+	}
+	
 	private void requestPrefix(IGuild guild)
 	{
 		IPrivateChannel pmWithOwner = guild.getOwner().getOrCreatePMChannel();
 		pmWithOwner.sendMessage("Hey guild owner! Please set a prefix to use! Something like `!` or `?`, but you could use anything, really. Keep in mind that popular prefixes (especially `!`) might be incompatible with other bots.");
 		IMessage response = Requester.waitForMessage(pmWithOwner);
 		pmWithOwner.sendMessage("Set prefix: `".concat(response.getContent()).concat("`"));
-		prefixMap.put(guild, response.getContent());
+		prefixMap.put(guild.getStringID(), response.getContent());
+		serializePrefixes();
 	}
 
 }

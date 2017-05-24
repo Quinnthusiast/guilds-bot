@@ -8,6 +8,8 @@ import sx.blah.discord.handle.obj.IMessage;
 public class Requester
 {
 	
+	private static final Object MONITOR_WAITFORMESSAGE = new Object();
+	private static IChannel channel_waitForMessage;
 	private static IMessage o_waitForMessage;
 	private static boolean lock_waitForMessage;
 	public static IMessage waitForMessage(IChannel channel)
@@ -15,13 +17,19 @@ public class Requester
 		// reset
 		lock_waitForMessage = true;
 		o_waitForMessage = null;
+		channel_waitForMessage = channel; 
 		
-		channel.getClient().getDispatcher().registerTemporaryListener(Requester::waitForMessageListener);
-		synchronized(o_waitForMessage)
+		channel.getClient().getDispatcher().registerListener(e -> {
+			if (e instanceof MessageReceivedEvent)
+			{
+				waitForMessageListener((MessageReceivedEvent) e);
+			}
+		});
+		synchronized(MONITOR_WAITFORMESSAGE)
 		{
 			while (lock_waitForMessage)
 			{
-				try { o_waitForMessage.wait(); } catch (InterruptedException e) {}
+				try { MONITOR_WAITFORMESSAGE.wait(); } catch (InterruptedException e) {}
 			}
 		}
 		
@@ -31,12 +39,13 @@ public class Requester
 	@EventSubscriber
 	private static void waitForMessageListener(MessageReceivedEvent e)
 	{
-		synchronized (o_waitForMessage)
+		if (!e.getChannel().equals(channel_waitForMessage)) { return; }
+		synchronized (MONITOR_WAITFORMESSAGE)
 		{
 			o_waitForMessage = e.getMessage();
+			// wake up thread
+			lock_waitForMessage = false;
+			MONITOR_WAITFORMESSAGE.notify();
 		}
-		// wake up thread
-		lock_waitForMessage = false;
-		o_waitForMessage.notify();
 	}
 }
