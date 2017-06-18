@@ -124,7 +124,7 @@ public class GuildBot
         
         try
         {
-            IRole subRole = g.getRolesByName(SUB_PREFIX + args[0]).get(0);
+            IRole subRole = g.getRolesByName(SUB_PREFIX + args[1]).get(0);
             
             if (author.getRolesForGuild(g).contains(subRole))
             {
@@ -144,7 +144,7 @@ public class GuildBot
         { // Role not found, make it!
             IRole newSubRole = g.createRole();
             newSubRole.changeMentionable(true);
-            newSubRole.changeName(SUB_PREFIX + args[0]);
+            newSubRole.changeName(SUB_PREFIX + args[1]);
             
             // now that the role has been made, process oncemore
             return subscribe(g, author, args);
@@ -155,7 +155,21 @@ public class GuildBot
     private boolean register(IGuild g, IUser author, String[] args)
     {
         if (args.length < 1) { return false; }
+        
         String ign = args[1];
+        
+        if (args.length >= 3)
+        {
+            StringBuilder b = new StringBuilder(ign);
+            for (int i = 2; i < args.length; ++i)
+            {
+                b.append(' ');
+                b.append(args[i]);
+            }
+            
+            ign = b.toString();
+        }
+        
         try
         {
             g.setUserNickname(author, ign);
