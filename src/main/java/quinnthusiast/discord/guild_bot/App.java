@@ -6,8 +6,15 @@ package quinnthusiast.discord.guild_bot;
  */
 public class App 
 {
+    private static GuildBot bot;
+    
     public static void main( String[] args )
     {
-    	new GuildBot(args[0]);
+        bot = new GuildBot(args[0]);
+    }
+    
+    public static GuildBot getBot()
+    {
+        return bot;
     }
 }

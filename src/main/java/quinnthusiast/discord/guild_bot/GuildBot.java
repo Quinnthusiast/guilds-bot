@@ -5,8 +5,10 @@ import java.io.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
+import quinnthusiast.discord.guild_bot.audio.*;
 import sx.blah.discord.api.*;
 import sx.blah.discord.api.events.*;
+import sx.blah.discord.api.internal.json.objects.*;
 import sx.blah.discord.handle.impl.events.*;
 import sx.blah.discord.handle.impl.events.guild.GuildCreateEvent;
 import sx.blah.discord.handle.impl.events.guild.channel.message.MessageReceivedEvent;
@@ -15,13 +17,12 @@ import sx.blah.discord.handle.obj.*;
 
 public class GuildBot
 {
-
     private static final String SUB_PREFIX = "sub-";
     
-    private IDiscordClient      c;
+    private IDiscordClient      client;
     private AtomicBoolean       ready;
-    private Map<String, String> prefixMap;
-    private Map<String, Long>   memberRoleMap;
+    private Map<String, String> prefixMap; // can't be <IGuild, String> because IGuild is not serializable
+    private Map<String, Long>   memberRoleMap; // ditto
     private ExecutorService     pool;
     
 
@@ -35,8 +36,7 @@ public class GuildBot
         if (memberRoleMap == null) memberRoleMap = new HashMap<>();
         pool = Executors.newCachedThreadPool();
 
-        c = new ClientBuilder().withToken(token).registerListeners(this).login();
-
+        client = new ClientBuilder().withToken(token).registerListeners(this).setMaxReconnectAttempts(-1).login();
     }
 
     @EventSubscriber
@@ -62,8 +62,14 @@ public class GuildBot
     public void onUserJoin(UserJoinEvent e)
     {
         IGuild g = e.getGuild();
-        g.getChannelByID(g.getLongID())
-                .sendMessage("Welcome to " + g.getName() + ", " + e.getUser().getDisplayName(g) + "! Please use `"
+        
+        if (e.getUser().isBot())
+        {
+            return;
+        }
+        
+        g.getChannelByID(g.getLongID()) // default channel
+                .sendMessage("Welcome to " + g.getName() + ", " + e.getUser().mention() + "! Please use `"
                         + prefixMap.get(g.getStringID())
                         + "register <ign>` (without the angle brackets) to register. \nEnjoy your stay with us~");
     }
@@ -77,13 +83,23 @@ public class GuildBot
 
     private void process(MessageReceivedEvent e)
     {
+        // XXX TEST CODE DELETE ME
+        if (e.getMessage().toString().equals("test"))
+        {
+            EmbedObject o = AudioEmbedFactory.create("text","http://google.com", "Raven", "Pavo", TimeUnit.SECONDS.toMillis(100));
+            
+            e.getMessage().getChannel().sendMessage(o);
+        }
+        
+        
+        
         IGuild theGuild = e.getGuild();
         String prefix = prefixMap.get(theGuild.getStringID());
         if (prefix == null && !e.getChannel().isPrivate())
         {
-            c.getDispatcher().unregisterListener(this);
+            client.getDispatcher().unregisterListener(this);
             requestPrefix(theGuild);
-            c.getDispatcher().registerListener(this);
+            client.getDispatcher().registerListener(this);
             return;
         }
 
@@ -94,37 +110,69 @@ public class GuildBot
         String content = e.getMessage().getContent();
         if (!content.startsWith(prefix)) { return; }
 
-        String[] sliced = content.substring(prefix.length()).split(" ");
+        String[] sliced = content.substring(prefix.length()).split(" ", 2);
+        String command = sliced[0].toLowerCase();
+        String args = (sliced.length < 2) ? null : sliced[1];
         
         boolean delete = false;
-        switch (sliced[0].toLowerCase())
+        
+        if (AudioManager.isMusicChannel(e.getChannel()))
         {
-            case "register":
-                delete = register(theGuild, e.getAuthor(), sliced);
-                break;
+            delete = true;
+            AudioScheduler player = AudioManager.INSTANCE.getPlayer(theGuild);
+            switch (command)
+            {
+                case "queue":
+                    AudioManager.INSTANCE.getManager().loadItemOrdered(player, args, player);
+                    break;
+                    
+                case "skip":
+                    if ("all".equals(args))
+                    {
+                        player.cleanup();
+                    }
+                    else
+                    {
+                        player.skip();
+                    }
+                    break;
                 
-            case "setrole":
-                delete = setRole(e.getMessage().getChannel(), e.getAuthor(), sliced);
-                break;
-                
-            case "sub":
-                delete = subscribe(theGuild, e.getAuthor(), sliced);
-                break;
+                default: delete = false;
+            }
         }
+        else
+        {
+            switch (command)
+            {
+                case "register":
+                    delete = register(theGuild, e.getAuthor(), args);
+                    break;
 
+                case "setrole":
+                    delete = setRole(e.getMessage().getChannel(), e.getAuthor(), args);
+                    break;
+
+                case "sub":
+                    delete = subscribe(theGuild, e.getAuthor(), args);
+                    break;
+
+                default: return;
+            }
+        }
         if (delete)
         {
             e.getMessage().delete();
         }
     }
 
-    private boolean subscribe(IGuild g, IUser author, String[] args)
+    private boolean subscribe(IGuild g, IUser author, String args)
     {
-        if (args.length < 1) return false;
+        // check non-emptiness and non-nullness at once
+        if ("".equals(args)) return false;
         
         try
         {
-            IRole subRole = g.getRolesByName(SUB_PREFIX + args[1]).get(0);
+            IRole subRole = g.getRolesByName(SUB_PREFIX + args).get(0);
             
             if (author.getRolesForGuild(g).contains(subRole))
             {
@@ -144,7 +192,7 @@ public class GuildBot
         { // Role not found, make it!
             IRole newSubRole = g.createRole();
             newSubRole.changeMentionable(true);
-            newSubRole.changeName(SUB_PREFIX + args[1]);
+            newSubRole.changeName(SUB_PREFIX + args);
             
             // now that the role has been made, process oncemore
             return subscribe(g, author, args);
@@ -152,27 +200,13 @@ public class GuildBot
         return true;
     }
 
-    private boolean register(IGuild g, IUser author, String[] args)
+    private boolean register(IGuild g, IUser author, String args)
     {
-        if (args.length < 1) { return false; }
-        
-        String ign = args[1];
-        
-        if (args.length >= 3)
-        {
-            StringBuilder b = new StringBuilder(ign);
-            for (int i = 2; i < args.length; ++i)
-            {
-                b.append(' ');
-                b.append(args[i]);
-            }
-            
-            ign = b.toString();
-        }
+        if ("".equals(args)) { return false; }
         
         try
         {
-            g.setUserNickname(author, ign);
+            g.setUserNickname(author, args);
         }
         catch (Exception e)
         {
@@ -198,12 +232,12 @@ public class GuildBot
         return true;
     }
 
-    private boolean setRole(IChannel c, IUser author, String[] args)
+    private boolean setRole(IChannel c, IUser author, String args)
     {
-        if (args.length < 1) { return false; }
+        if ("".equals(args)) { return false; }
         if (!c.getGuild().getOwner().equals(author)) { return false; }
 
-        List<IRole> match = c.getGuild().getRolesByName(args[1]);
+        List<IRole> match = c.getGuild().getRolesByName(args);
         if (match.isEmpty())
         {
             c.sendMessage("no matching roles found");
@@ -304,6 +338,11 @@ public class GuildBot
         pmWithOwner.sendMessage("Set prefix: `".concat(response.getContent()).concat("`"));
         prefixMap.put(guild.getStringID(), response.getContent());
         serializePrefixes();
+    }
+    
+    public IDiscordClient getClient()
+    {
+        return client;
     }
 
 }
