@@ -179,10 +179,10 @@ public class GuildBot
             switch (command)
             {
                 // XXX DEBUG COMMAND
-                case "murder":
+                /*case "murder":
                     e.getMessage().delete();
                     System.exit(0);
-                    break;
+                    break;*/
                 
                 case "register":
                     delete = register(theGuild, author, args);
