@@ -1,9 +1,12 @@
 
 package quinnthusiast.discord.guild_bot.audio;
 
+import static quinnthusiast.discord.guild_bot.audio.AudioEmbedFactory.*;
 import java.util.*;
+import java.util.concurrent.*;
 import com.sedmelluq.discord.lavaplayer.player.*;
 import com.sedmelluq.discord.lavaplayer.source.*;
+import com.sedmelluq.discord.lavaplayer.tools.*;
 import sx.blah.discord.handle.obj.*;
 
 public enum AudioManager // implements AudioEventHandler
@@ -20,6 +23,7 @@ public enum AudioManager // implements AudioEventHandler
 
     private final AudioPlayerManager apm;
     private final Map<IGuild, AudioScheduler> guildSchedulers;
+    private final Map<IUser, UserTrackQueue> userTrackLists;
 
     private AudioManager()
     {
@@ -28,10 +32,11 @@ public enum AudioManager // implements AudioEventHandler
         apm.setTrackStuckThreshold(BUFFER);
         AudioSourceManagers.registerRemoteSources(apm);
         
-        guildSchedulers = new HashMap<>();
+        guildSchedulers = new ConcurrentHashMap<>();
+        userTrackLists = new ConcurrentHashMap<>();
     }
     
-    public AudioScheduler getPlayer(IGuild g)
+    public AudioScheduler getSchedulerForGuild(IGuild g)
     {
         if (guildSchedulers.containsKey(g)) 
         {
@@ -50,13 +55,31 @@ public enum AudioManager // implements AudioEventHandler
             }
             
             guildSchedulers.put(g, new AudioScheduler(apm.createPlayer(), channel));
-            return getPlayer(g);
+            return getSchedulerForGuild(g);
         }
     }
     
-    public AudioPlayerManager getManager()
+    public UserTrackQueue getTrackQueueForUser(IUser u)
     {
-        return apm;
+        if (userTrackLists.containsKey(u))
+        {
+            return userTrackLists.get(u);
+        }
+        else
+        {
+            userTrackLists.put(u, new UserTrackQueue(u));
+            return getTrackQueueForUser(u);
+        }
+    }
+    
+    public Future<Void> load(IChannel channel, String identifier, IUser requester)
+    {
+        UserTrackQueue.TrackLoader loader = getTrackQueueForUser(requester).new TrackLoader()
+                .setOnTrackLoaded(track -> channel.sendMessage(create("Added track to your queue", track.getInfo(), requester).build()))
+                .setOnPlaylistLoaded(playlist -> channel.sendMessage(create("Added playlist to your queue", null, requester).build()))
+                .setOnLoadFailed(exception -> channel.sendMessage(create("Load failed" + ((exception.severity != FriendlyException.Severity.COMMON) ? ": " + exception.severity.toString() : ""), null, requester).build()))
+                .setOnNoMatches(() -> channel.sendMessage(create("No matches for requested track", null, requester).build()));
+        return apm.loadItemOrdered(getSchedulerForGuild(channel.getGuild()), identifier, loader);
     }
     
     /**
@@ -72,5 +95,5 @@ public enum AudioManager // implements AudioEventHandler
     {
         return MUSIC_QUEUE_CHANNEL_NAME.equals(c.getName()) || (c.getGuild().getChannelsByName(MUSIC_QUEUE_CHANNEL_NAME).isEmpty() && c.getGuild().getGeneralChannel().equals(c));
     }
-
+    
 }

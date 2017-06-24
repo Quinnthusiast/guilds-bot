@@ -1,19 +1,21 @@
 
 package quinnthusiast.discord.guild_bot;
 
+import static quinnthusiast.discord.guild_bot.audio.AudioEmbedFactory.*;
 import java.io.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
+import org.slf4j.*;
 import quinnthusiast.discord.guild_bot.audio.*;
 import sx.blah.discord.api.*;
 import sx.blah.discord.api.events.*;
-import sx.blah.discord.api.internal.json.objects.*;
 import sx.blah.discord.handle.impl.events.*;
 import sx.blah.discord.handle.impl.events.guild.GuildCreateEvent;
 import sx.blah.discord.handle.impl.events.guild.channel.message.MessageReceivedEvent;
 import sx.blah.discord.handle.impl.events.guild.member.UserJoinEvent;
 import sx.blah.discord.handle.obj.*;
+import sx.blah.discord.util.*;
 
 public class GuildBot
 {
@@ -42,19 +44,21 @@ public class GuildBot
     @EventSubscriber
     public void onReadyEvent(ReadyEvent e)
     {
+        LoggerFactory.getLogger(getClass()).debug("Bot Loaded");
         ready.set(true);
+        
     }
-
+    
     @EventSubscriber
     public void onMessageReceived(MessageReceivedEvent e)
     {
-        if (e.getChannel().isPrivate())
+        if (e.getChannel().isPrivate() || e.getAuthor().isBot())
         {
             // do not process PMs here
+            // ignore bot messages
             return;
         }
 
-        if (!ready.get()) return;
         pool.execute(() -> process(e));
     }
 
@@ -83,15 +87,10 @@ public class GuildBot
 
     private void process(MessageReceivedEvent e)
     {
-        // XXX TEST CODE DELETE ME
-        if (e.getMessage().toString().equals("test"))
-        {
-            EmbedObject o = AudioEmbedFactory.create("text","http://google.com", "Raven", "Pavo", TimeUnit.SECONDS.toMillis(100));
-            
-            e.getMessage().getChannel().sendMessage(o);
-        }
-        
-        
+        // wait for the bot to be ready,
+        // must be executed on a pool thread
+        // as to not block the dispatcher thread
+        while (!ready.get());
         
         IGuild theGuild = e.getGuild();
         String prefix = prefixMap.get(theGuild.getStringID());
@@ -105,8 +104,8 @@ public class GuildBot
 
         if (e.getChannel().isPrivate()) { return; }
 
-        // I know this is a cringy command interpreter but the bot only needs like two
-        // commands
+        // XXX SCHEDULED FOR REWRITAL
+        // WILL IMPLEMENT A NEW COMMAND API IN A FUTURE VERSION
         String content = e.getMessage().getContent();
         if (!content.startsWith(prefix)) { return; }
 
@@ -115,45 +114,86 @@ public class GuildBot
         String args = (sliced.length < 2) ? null : sliced[1];
         
         boolean delete = false;
-        
+        IUser author = e.getAuthor();
         if (AudioManager.isMusicChannel(e.getChannel()))
         {
             delete = true;
-            AudioScheduler player = AudioManager.INSTANCE.getPlayer(theGuild);
+            AudioManager am = AudioManager.INSTANCE;
+            AudioScheduler scheduler = am.getSchedulerForGuild(theGuild);
             switch (command)
             {
-                case "queue":
-                    AudioManager.INSTANCE.getManager().loadItemOrdered(player, args, player);
+                case "lineup":
+                    try
+                    {
+                        scheduler.setOnJoinDjQueue(u -> e.getChannel().sendMessage(create("Lined up", null, u).build()));
+                        scheduler.setOnLeaveDjQueue(u -> e.getChannel().sendMessage(create("Left lineup", null, u).build()));
+                        scheduler.toggleDj(author);
+                    } 
+                    catch (IllegalStateException ex)
+                    { // user playlist was empty
+                        e.getChannel().sendMessage(create("Playlist empty: Failed to join DJ queue", null, author).build());
+                    }
                     break;
                     
-                case "skip":
+                case "queue":
+                    if ("".equals(args))
+                    {
+                        break;
+                    }
+                    AudioManager.INSTANCE.load(e.getChannel(), args, author);
+                    break;
+                    
+                /*case "skip":
                     if ("all".equals(args))
                     {
-                        player.cleanup();
+                        scheduler.cleanup();
                     }
                     else
                     {
-                        player.skip();
+                        scheduler.skip();
                     }
+                    break;*/
+                    
+                case "dj":
+                    EmbedBuilder queueMessage = create("DJ Queue", null, author);
+                    Queue<IUser> djQueue = scheduler.getQueue();
+                    IUser dj = djQueue.poll();
+                    queueMessage.appendField("Current", dj != null ? dj.getDisplayName(theGuild) : "None",  true);
+                    dj = djQueue.poll();
+                    queueMessage.appendField("Up next", dj != null ? dj.getDisplayName(theGuild) : "None", true);
+                    
+                    djQueue.forEach(i -> queueMessage.appendField("After", i.getDisplayName(theGuild), false));
+                    e.getChannel().sendMessage(queueMessage.build());
+                    break;
+                    
+                case "song":
+                    e.getChannel().sendMessage(create("Currently playing", scheduler.getCurrentTrack().getInfo(), author).build());
                     break;
                 
                 default: delete = false;
             }
         }
-        else
+        
+        if (!delete)
         {
             switch (command)
             {
+                // XXX DEBUG COMMAND
+                case "murder":
+                    e.getMessage().delete();
+                    System.exit(0);
+                    break;
+                
                 case "register":
-                    delete = register(theGuild, e.getAuthor(), args);
+                    delete = register(theGuild, author, args);
                     break;
 
                 case "setrole":
-                    delete = setRole(e.getMessage().getChannel(), e.getAuthor(), args);
+                    delete = setRole(e.getMessage().getChannel(), author, args);
                     break;
 
                 case "sub":
-                    delete = subscribe(theGuild, e.getAuthor(), args);
+                    delete = subscribe(theGuild, author, args);
                     break;
 
                 default: return;
@@ -167,35 +207,43 @@ public class GuildBot
 
     private boolean subscribe(IGuild g, IUser author, String args)
     {
-        // check non-emptiness and non-nullness at once
-        if ("".equals(args)) return false;
-        
-        try
+        if (args == null)
         {
-            IRole subRole = g.getRolesByName(SUB_PREFIX + args).get(0);
-            
-            if (author.getRolesForGuild(g).contains(subRole))
+            return false;
+        }
+        
+        args = args.trim().toLowerCase();
+        
+        List<IRole> matching = g.getRolesByName(SUB_PREFIX + args);
+        
+        if (matching.isEmpty())
+        {
+            IRole subRole = g.createRole();
+            subRole.changeName(SUB_PREFIX + args);
+            subRole.changeMentionable(true);
+            return subscribe(g, author, args);
+        }
+        else if (matching.size() > 1)
+        {
+            matching.forEach(IRole::delete);
+            return subscribe(g, author, args);
+        }
+        
+        IRole subRole = matching.get(0);
+        if (g.getRolesForUser(author).contains(subRole))
+        {
+            if (g.getUsersByRole(subRole).size() <= 1)
             {
-                author.removeRole(subRole);
-                
-                if (g.getUsersByRole(subRole).isEmpty())
-                {
-                    subRole.delete();
-                }
+                subRole.delete();
             }
             else
             {
-                author.addRole(subRole);
+                author.removeRole(subRole);
             }
         }
-        catch(IndexOutOfBoundsException e)
-        { // Role not found, make it!
-            IRole newSubRole = g.createRole();
-            newSubRole.changeMentionable(true);
-            newSubRole.changeName(SUB_PREFIX + args);
-            
-            // now that the role has been made, process oncemore
-            return subscribe(g, author, args);
+        else
+        {
+            author.addRole(subRole);
         }
         return true;
     }

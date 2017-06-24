@@ -1,8 +1,9 @@
 package quinnthusiast.discord.guild_bot.audio;
 
+import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.*;
 import com.sedmelluq.discord.lavaplayer.track.*;
-import quinnthusiast.discord.guild_bot.*;
 import sx.blah.discord.api.internal.json.objects.*;
 import sx.blah.discord.handle.obj.*;
 import sx.blah.discord.util.*;
@@ -13,56 +14,70 @@ public class AudioEmbedFactory
     private static final String MAIN_ICON = "https://www.youtube.com/yt/brand/media/image/YouTube-icon-full_color.png";
     private static final String DURATION = "Duration";
     
-    private static IUser me = null;
-    private static String myAvatarUrl;
-    private static String myHandle;
-    
-    private static void lazyMe()
+    public static EmbedBuilder newBuilder(IUser u)
     {
-        if (me == null)
+        EmbedBuilder builder = new TimestampedEmbedBuilder();
+        
+        if (u != null)
         {
-            while ((me = App.getBot().getClient().getUserByID(153885264987553792L)) == null);
-            
-            myAvatarUrl = me.getAvatarURL();
-            myHandle = me.getName() + "#" + me.getDiscriminator();
+            builder
+                .withFooterIcon(u.getAvatarURL())
+                .withFooterText(u.getName() + "#" + u.getDiscriminator());
         }
-    }
-    
-    public static EmbedBuilder newBuilder()
-    {
-        lazyMe();
-        return new TimestampedEmbedBuilder()
+        return builder
                 .withColor(COLOR)
                 
-                .withAuthorIcon(MAIN_ICON)
-                .withThumbnail(MAIN_ICON)
-                
-                .withFooterIcon(myAvatarUrl)
-                .withFooterText(myHandle);
+                .withAuthorIcon(MAIN_ICON);
+                //.withThumbnail(MAIN_ICON);
     }
     
-    public static EmbedObject create(String text, String url, String title, String artist, long duration)
+    public static EmbedBuilder create(EmbedBuilder chain, String text, String url, String title, String artist, long duration, IUser u)
     {
-        lazyMe();
+        if (chain == null)
+        {
+            chain = newBuilder(u);
+        }
         
-        String trackTime = String.format("%02d:%02d", TimeUnit.MILLISECONDS.toMinutes(duration), TimeUnit.MILLISECONDS.toSeconds(duration) % 60);
-        
-        return newBuilder()
-                .withAuthorName(title)
-                
-                .withUrl(url)
-                
-                .withDesc(text + '\u2014')
-                
-                .appendField(title, artist, true)
-                .appendField(trackTime, DURATION, true)
-                
-                .build();
+        return addTrack(chain, title, artist, duration)
+                .withAuthorName(text + '\u2014')
+                .withUrl(url);
     }
     
-    public static EmbedObject create(String text, AudioTrackInfo info)
+    public static EmbedBuilder addTrack(EmbedBuilder b, String title, String artist, long duration)
     {
-        return ((info != null) ? create(text, info.uri, info.title, info.author, info.length) : newBuilder().withAuthorName(text + '\u2014').build());
+        String formattedDuration = String.format("%02d:%02d", TimeUnit.MILLISECONDS.toMinutes(duration), TimeUnit.MILLISECONDS.toSeconds(duration) % 60);
+        
+        return b
+                .appendField(title + " ", artist, true)
+                .appendField(DURATION, formattedDuration, true);
+    }
+    
+    public static EmbedBuilder create(String text, String url, String title, String artist, long duration, IUser u)
+    {
+        return create(null, text, url, title, artist, duration, u);
+    }
+    
+    public static EmbedBuilder create(String text, AudioTrackInfo info, IUser u)
+    {
+        return create(null, text, info, u);
+    }
+    
+    public static EmbedBuilder create(EmbedBuilder chain, String text, AudioTrackInfo info, IUser u)
+    {
+        return ((info != null) ? create(chain, text, info.uri, info.title, info.author, info.length, u) : newBuilder(u).withAuthorName(text + '\u2014'));
+    }
+    
+    public static EmbedBuilder createMultiple(EmbedBuilder chain, String text, AudioTrackInfo[] info, IUser u) 
+    {
+        if (chain == null)
+        {
+            return createMultiple(newBuilder(u), text, info, u);
+        }
+        
+        Consumer<AudioTrackInfo> curry = e -> addTrack(chain, e.title, e.author, e.isStream ? -1 : e.length);
+        Arrays.stream(info).forEach(curry);
+        
+        return chain;
     }
     
     private static class TimestampedEmbedBuilder extends EmbedBuilder
